@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 產出物（corpus run 報告、triage 報告、模擬產物）
+corpus_report.json
+orca_report.json
+triage_report.json
+sim.vvp
+sim.log
+*.vcd
+obj_dir/
+
+# τ 校準產出：tau_config.json / tau_history.json 建議進 git（審計軌跡）
+# tau_report.json 每次重產，可忽略
+tau_report.json
+
+# 本機校準資料、mutant 語料與模型 checkpoint 不進版控
+calibration_log/
+mutants.json
+*.pt
+
+# 外部 repo（clone 用，不進版控）
+/open-ip-portfolio/
+/orca-v63/
+/dynamis/
+/helioslm/
