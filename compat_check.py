@@ -153,29 +153,29 @@ def isotonic_map_fit(src, dst):
     order = sorted(range(len(src)), key=lambda i: src[i])
     xs = [src[i] for i in order]
     ys = [dst[i] for i in order]
-    # pool adjacent violators
-    levels = []
-    weights = []
+    # pool adjacent violators; blocks: [x_first, x_last, level, weight]
+    blocks = []
     for x, y in zip(xs, ys):
-        levels.append(y)
-        weights.append(1)
-        while len(levels) >= 2 and levels[-2] > levels[-1]:
-            w = weights[-2] + weights[-1]
-            lv = (levels[-2] * weights[-2] + levels[-1] * weights[-1]) / w
-            levels[-2:-1 + 1] = [lv]
-            weights[-2:-1 + 1] = [w]
+        blocks.append([x, x, y, 1])
+        while len(blocks) >= 2 and blocks[-2][2] > blocks[-1][2]:
+            b1, b2 = blocks[-2], blocks[-1]
+            w = b1[3] + b2[3]
+            lv = (b1[2] * b1[3] + b2[2] * b2[3]) / w
+            blocks[-2:] = [[b1[0], b2[1], lv, w]]
     def f(v):
-        if v <= xs[0]:
-            return levels[0]
-        if v >= xs[-1]:
-            return levels[-1]
-        i = bisect_left(xs, v)
-        # linear interpolation between adjacent fitted levels
-        x0, x1 = xs[i - 1], xs[i]
-        y0, y1 = levels[min(i - 1, len(levels) - 1)], levels[min(i, len(levels) - 1)]
-        if x1 == x0:
-            return y0
-        return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
+        if v <= blocks[0][0]:
+            return blocks[0][2]
+        if v >= blocks[-1][1]:
+            return blocks[-1][2]
+        for i in range(1, len(blocks)):
+            if v <= blocks[i][1]:
+                # linear interpolation between adjacent fitted levels
+                x0, x1 = blocks[i - 1][1], blocks[i][0]
+                y0, y1 = blocks[i - 1][2], blocks[i][2]
+                if x1 == x0:
+                    return y1
+                return y0 + (y1 - y0) * (v - x0) / (x1 - x0)
+        return blocks[-1][2]
     return f
 
 
@@ -199,7 +199,6 @@ def agreement(d1, d2):
 
 def mcnemar(d1, d2):
     """McNemar test (no continuity correction) on decision disagreements."""
-    b = sum(1 for a, bb in zip(d1, d2) if a != bb and a == d1[0])  # placeholder
     b = c = 0
     for a, bb in zip(d1, d2):
         if a != bb:
