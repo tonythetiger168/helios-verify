@@ -94,7 +94,8 @@ def run_task(gate: VerifierGate, ip_root: Path, task: dict,
                       diff=f"+mutant:{mutant['id']}" if mutant else "+clean",
                       files=[f"rtl/{proto}_top.sv"],
                       agent_conf=0.6)
-        rec = gate.verify(patch, workdir, top=f"tb_{proto}")
+        rec = gate.verify(patch, workdir, top=f"tb_{proto}",
+                          dut_top=f"{proto}_top")
 
         return {"proto": proto, "mutant": mutant["id"] if mutant else None,
                 "route": rec.route, "sim": rec.sim_result.value,

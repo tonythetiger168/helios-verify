@@ -161,7 +161,7 @@ if __name__ == "__main__":
     for name, sc in [("mock", MockScorer()),
                      ("helios(fallback)", HeliosLMScorer()),
                      ("const0.9", ConstantScorer(0.9))]:
-        r = HeliosRouter("/mnt/agents/output/helios-verify/tau_config.json", scorer=sc)
+        r = HeliosRouter(str(Path(__file__).with_name("tau_config.json")), scorer=sc)
         good = Patch(task_type="rtl_fix", agent_conf=0.9)
         bad = Patch(task_type="rtl_fix", agent_conf=0.1)
         sg = StaticSignals(lines_changed=3, sv_syntax_check="pass",

@@ -36,7 +36,7 @@ FeedbackRecord ──▶ calibration_log/ ──▶ tau_calibrate.py（累積 �
 # 手動驗證工具鏈
 make lint sim synth formal
 
-# 跑 VerifierGate demo（三種 route 各一次）
+# 跑 VerifierGate demo（fast/deep route 實例）
 python verifier_gate.py
 
 # 看產生的 FeedbackRecord

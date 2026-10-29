@@ -4,7 +4,7 @@ verifier_gate.py — Verifier 層骨架 v0.1 (helios-verify project)
  Router 介面預留：M1 用 RuleRouter（rule-based τ），M2 換 HeliosLM scorer。
 
 用法：
-    python verifier_gate.py            # demo：對當前 repo 跑三種 route 各一次
+    python verifier_gate.py            # demo：fast_path 與 deep_verify 各跑實例
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def _run(cmd: list, cwd: Path, timeout: int = 300) -> tuple:
         return -2, f"TOOL_MISSING: {e}"
 
 def verilator_lint(workdir: Path, top: str) -> tuple:
-    rc, out = _run(["verilator", "--lint-only", "-Wall",
+    rc, out = _run(["verilator", "--lint-only", "-Wall", "--timing",
                     "--top-module", top, "-f", "files.f"], workdir)
     return rc == 0, out, out.count("Warning")
 
@@ -120,19 +120,47 @@ def verilator_sim(workdir: Path, top: str, timeout: int = 600,
             pass  # tx_adapter 不存在時維持字串比對
     return str_result
 
+def _rtl_sources(workdir: Path) -> list[str]:
+    """Return RTL sources for Yosys, preferring files.f but excluding testbenches."""
+    sources = []
+    files_f = workdir / "files.f"
+    if files_f.exists():
+        for line in files_f.read_text().splitlines():
+            item = line.strip()
+            if not item or item.startswith("#"):
+                continue
+            name = Path(item).name.lower()
+            if item.endswith((".v", ".sv")) and not name.startswith(("tb_", "test_")):
+                sources.append(item)
+    if not sources:
+        sources = [str(p.relative_to(workdir))
+                   for p in sorted((workdir / "rtl").glob("*.v")) +
+                          sorted((workdir / "rtl").glob("*.sv"))]
+    return sources
+
+
+def _read_rtl_tcl(workdir: Path) -> str:
+    sources = _rtl_sources(workdir)
+    if not sources:
+        raise FileNotFoundError(f"no RTL sources found under {workdir}")
+    sv = any(s.endswith(".sv") for s in sources)
+    return "read_verilog " + ("-sv " if sv else "") + " ".join(sources)
+
+
 def yosys_synth_check(workdir: Path, top: str) -> tuple:
-    tcl = f"read_verilog -f files.f; hierarchy -top {top}; synth; check"
+    tcl = f"{_read_rtl_tcl(workdir)}; hierarchy -top {top}; synth; check"
     rc, out = _run(["yosys", "-p", tcl], workdir)
     return rc == 0 and "ERROR" not in out, out
 
 def yosys_formal(workdir: Path, top: str, gold: str | None = None) -> FormalResult:
     """gold=None 跑 SAT assertion check；有 golden 時跑等價驗證。"""
+    read_rtl = _read_rtl_tcl(workdir)
     if gold:
-        tcl = (f"read_verilog -f files.f; prep -top {top}; "
+        tcl = (f"{read_rtl}; prep -top {top}; "
                f"equiv_make {gold} {top} equiv; prep -top equiv; "
                f"equiv_simple; equiv_status")
     else:
-        tcl = f"read_verilog rtl/alu.v; prep -top {top}; sat -verify -prove-asserts"
+        tcl = f"{read_rtl}; prep -top {top}; sat -verify -prove-asserts"
     rc, out = _run(["yosys", "-p", tcl], workdir, timeout=900)
     if rc != 0: return FormalResult.UNKNOWN
     if "SAT proof finished" in out or "Proved" in out: return FormalResult.PROVED
@@ -151,15 +179,16 @@ class VerifierGate:
         self.log_dir.mkdir(exist_ok=True)
 
     def verify(self, patch: Patch, workdir: Path, top: str,
-               gold: str | None = None) -> FeedbackRecord:
+               gold: str | None = None, dut_top: str | None = None) -> FeedbackRecord:
         pid = str(uuid.uuid4())[:8]
         sig = StaticSignals(lines_changed=patch.diff.count("\n+"),
                             files_touched=len(patch.files) or 1)
         rec = FeedbackRecord(patch_id=pid, route="", static_signals=sig)
+        dut_top = dut_top or top
 
         # 1. 靜態檢查（永遠跑，便宜）
         lint_ok, lint_out, sig.verilator_lint_warnings = verilator_lint(workdir, top)
-        synth_ok, _ = yosys_synth_check(workdir, top)
+        synth_ok, _ = yosys_synth_check(workdir, dut_top)
         sig.sv_syntax_check = "pass" if (lint_ok and synth_ok) else "fail"
 
         # 2. Routing
@@ -175,7 +204,7 @@ class VerifierGate:
 
         # 4. 形式驗證（conf 低或 depth 要求時）
         if depth.run_formal or conf < 0.3:
-            rec.formal_result = yosys_formal(workdir, top, gold)
+            rec.formal_result = yosys_formal(workdir, dut_top, gold)
 
         # 5. Merge 判定
         rec.merged = (rec.sim_result == SimResult.PASS and
@@ -197,10 +226,10 @@ if __name__ == "__main__":
     cases = [
         Patch(task_type="rtl_fix", diff="+1 line", agent_conf=0.9),   # -> fast_path
         Patch(task_type="debug_triage", diff="+10\n+lines", agent_conf=0.5),  # -> deep_verify
-        Patch(task_type="rtl_fix", diff="", agent_conf=0.1),          # -> reject
+        Patch(task_type="rtl_fix", diff="", agent_conf=0.1),          # low-confidence deep_verify
     ]
     for p in cases:
-        rec = gate.verify(p, workdir, top="tb_alu")
+        rec = gate.verify(p, workdir, top="tb_alu", dut_top="alu")
         print(f"[{rec.route:>11}] conf={rec.helios_conf:.3f} "
               f"sim={rec.sim_result.value} formal={rec.formal_result.value} "
               f"merged={rec.merged}")

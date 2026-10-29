@@ -1,4 +1,6 @@
 // alu.v — minimal demo DUT for the verifier platform
+`timescale 1ns/1ps
+
 module alu #(parameter W = 8) (
     input  wire [W-1:0] a,
     input  wire [W-1:0] b,

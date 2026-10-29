@@ -28,6 +28,10 @@ module tb_alu;
         check(8'hF0, 8'h0F, 3'd4, 8'hFF);  // xor
         check(8'hAA, 8'h55, 3'd5, 8'h55);  // pass b
         check(8'h00, 8'h00, 3'd0, 8'h00);  // zero flag case
+        if (zf !== 1'b1) begin
+            errors = errors + 1;
+            $display("FAIL zero flag: zf=%b exp=1", zf);
+        end
 
         if (errors == 0) $display("TEST PASS");
         else             $display("TEST FAIL (%0d)", errors);
