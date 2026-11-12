@@ -76,20 +76,21 @@ def run_task(gate: VerifierGate, ip_root: Path, task: dict,
             src = ip_root / d
             if src.exists():
                 shutil.copytree(src, workdir / d)
-        shutil.copy(task["makefile"], workdir / "Makefile.task")
+        # VerifierGate invokes `make sim`; expose the selected protocol as default.
+        shutil.copy(task["makefile"], workdir / "Makefile")
 
         # mutant 注入：revert 已知修復 = 產生 labeled negative sample
         # 格式（mutants_gen.py 標準）：buggy_content = {repo相對路徑: 內容}
         mfiles = mutant.get("buggy_content", {}) if mutant else {}
-        hits = (proto in mutant.get("affected", [])) or \
-               any(proto.lower() in f.lower() for f in mfiles)
+        hits = bool(mutant) and ((proto in mutant.get("affected", [])) or
+                                any(proto.lower() in f.lower() for f in mfiles))
         if mutant and hits:
             for rel, buggy in mfiles.items():
                 f = workdir / rel
                 if f.exists():
                     f.write_text(buggy)
 
-        # 以 Makefile.task 的 sim/syn target 為 ground truth 流程
+        # 使用協議 Makefile 的 sim target；靜態檢查仍由 VerifierGate 執行
         patch = Patch(task_type="corpus_regression",
                       diff=f"+mutant:{mutant['id']}" if mutant else "+clean",
                       files=[f"rtl/{proto}_top.sv"],
