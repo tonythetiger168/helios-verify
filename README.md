@@ -28,6 +28,24 @@ VerifierGate ── 1. 靜態檢查 ──▶ verilator --lint-only + yosys synt
 FeedbackRecord ──▶ calibration_log/ ──▶ tau_calibrate.py（累積 ≥100 筆後校準 τ）
 ```
 
+## 引擎選擇：開源工具或 minisim
+
+VerifierGate 四步可改用 [minisim](https://github.com/tonythetiger168/minisim) 引擎，經它的 MCP server `mmcp` 呼叫，結果是 JSON 判定而不是 log 字串比對：
+
+| 步驟 | `oss`（預設） | `minisim` |
+|---|---|---|
+| 靜態檢查 | verilator --lint-only | mlint（規則代號、檔案行號、signal） |
+| 可綜合檢查 | yosys synth | msynth（另購；沒有時 msim -elab） |
+| 模擬 | make sim（iverilog） | msim（`-result` 判定 + 「TEST PASS」） |
+| 形式 / 等價 | yosys sat / equiv | mformal / mequiv（另購；沒有或無授權時退回 yosys） |
+
+```bash
+python verifier_gate.py --engine minisim     # 或 HELIOS_ENGINE=minisim，corpus_runner 等不必改
+python verifier_gate.py --engine both        # minisim 判定，開源工具同時跑作獨立對照
+```
+
+`both` 會在 FeedbackRecord 的 `cross_check` 記下每步兩邊的結果與 `disagreements`，用來量兩套引擎的一致率。找 mmcp 的順序：`$MMCP`、`$MINISIM_HOME/bin/mmcp`、PATH。測試：`python -m unittest tests/test_minisim_engine.py`（沒有 mmcp 時跳過）。
+
 ## 快速開始
 
 相依：python3.10+、verilator、iverilog、yosys
