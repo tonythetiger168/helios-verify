@@ -4,12 +4,17 @@ verifier_gate.py — Verifier 層骨架 v0.1 (helios-verify project)
  Router 介面預留：M1 用 RuleRouter（rule-based τ），M2 換 HeliosLM scorer。
 
 用法：
-    python verifier_gate.py            # demo：fast_path 與 deep_verify 各跑實例
+    python verifier_gate.py                    # demo：fast_path 與 deep_verify 各跑實例
+    python verifier_gate.py --engine minisim   # 改用 minisim 引擎（mlint / msim / msynth / mformal / mequiv）
+    python verifier_gate.py --engine both      # minisim 判定，開源工具同時跑作獨立對照，不一致記入 cross_check
+
+引擎也可用環境變數 HELIOS_ENGINE=oss|minisim|both 選（預設 oss），corpus_runner 等呼叫端不必改。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -62,6 +67,8 @@ class FeedbackRecord:
     merged: bool = False
     helios_conf: float = -1.0
     timestamp: float = field(default_factory=time.time)
+    engine: str = "oss"                 # oss | minisim | both
+    cross_check: dict | None = None     # engine=both：每步兩邊的結果與是否一致
 
 
 # ---------------- Router ----------------
@@ -170,13 +177,19 @@ def yosys_formal(workdir: Path, top: str, gold: str | None = None) -> FormalResu
 
 # ---------------- VerifierGate ----------------
 
+ENGINES = ("oss", "minisim", "both")
+
+
 class VerifierGate:
     def __init__(self, router: RuleRouter, log_dir: Path = Path("calibration_log"),
-                 oracle=None):
+                 oracle=None, engine: str | None = None):
         self.router = router
         self.oracle = oracle          # TxOracle 或 None（字串比對）
         self.log_dir = log_dir
         self.log_dir.mkdir(exist_ok=True)
+        self.engine = engine or os.environ.get("HELIOS_ENGINE", "oss")
+        if self.engine not in ENGINES:
+            raise ValueError(f"engine must be one of {ENGINES}, not {self.engine!r}")
 
     def verify(self, patch: Patch, workdir: Path, top: str,
                gold: str | None = None, dut_top: str | None = None) -> FeedbackRecord:
@@ -185,6 +198,10 @@ class VerifierGate:
                             files_touched=len(patch.files) or 1)
         rec = FeedbackRecord(patch_id=pid, route="", static_signals=sig)
         dut_top = dut_top or top
+
+        rec.engine = self.engine
+        if self.engine != "oss":
+            return self._verify_minisim(patch, workdir, top, gold, dut_top, rec, sig)
 
         # 1. 靜態檢查（永遠跑，便宜）
         lint_ok, lint_out, sig.verilator_lint_warnings = verilator_lint(workdir, top)
@@ -212,6 +229,65 @@ class VerifierGate:
         self._log(rec)
         return rec
 
+    def _verify_minisim(self, patch, workdir, top, gold, dut_top, rec, sig) -> FeedbackRecord:
+        """minisim 引擎判定；engine=both 時開源工具同步跑，結果只記錄不參與判定。
+        付費步驟（msynth / mformal / mequiv）不可用時，那一步改用開源工具並記在 cross_check。"""
+        import minisim_engine as me
+        tools = me.available(workdir)
+        both = self.engine == "both"
+        cc: dict = {}
+        rtl = _rtl_sources(workdir)
+
+        lint_ok, _, n_lint, _ = me.lint(workdir, top)
+        sig.verilator_lint_warnings = n_lint          # 欄位名沿用：此處是 mlint 的 error + warning 數
+        synth_ok, srep = me.synth_check(workdir, dut_top, rtl, tools)
+        if synth_ok is None:                          # 無授權：退回 Yosys
+            synth_ok, _ = yosys_synth_check(workdir, dut_top)
+            cc["synth_fallback"] = "yosys"
+        cc["synth_by"] = "msynth" if "msynth_run" in tools and "synth_fallback" not in cc else srep.get("proxy", "yosys")
+        if both:
+            v_ok, _, v_warn = verilator_lint(workdir, top)
+            y_ok, _ = yosys_synth_check(workdir, dut_top)
+            cc["lint"] = {"minisim": lint_ok, "oss": v_ok, "agree": lint_ok == v_ok,
+                          "mlint_findings": n_lint, "verilator_warnings": v_warn}
+            cc["synth"] = {"minisim": synth_ok, "oss": y_ok, "agree": synth_ok == y_ok}
+        sig.sv_syntax_check = "pass" if (lint_ok and synth_ok) else "fail"
+
+        route, depth, conf = self.router.route(patch, sig)
+        rec.route, rec.helios_conf = route.value, conf
+        if route == Route.REJECT:
+            rec.cross_check = cc or None
+            self._log(rec)
+            return rec
+
+        if depth.run_simulation:
+            verdict, _ = me.sim(workdir, top)
+            rec.sim_result = SimResult(verdict)
+            if both:
+                o = verilator_sim(workdir, top, oracle=self.oracle)
+                cc["sim"] = {"minisim": verdict, "oss": o.value, "agree": verdict == o.value}
+        else:
+            rec.sim_result = SimResult.SKIPPED
+
+        if depth.run_formal or conf < 0.3:
+            f, _ = me.formal(workdir, dut_top, rtl, tools, gold)
+            if f is None:                             # 無 mformal / mequiv 或無授權：退回 Yosys
+                rec.formal_result = yosys_formal(workdir, dut_top, gold)
+                cc["formal_fallback"] = "yosys"
+            else:
+                rec.formal_result = FormalResult(f)
+                if both:
+                    o = yosys_formal(workdir, dut_top, gold)
+                    cc["formal"] = {"minisim": f, "oss": o.value, "agree": f == o.value}
+
+        rec.merged = (rec.sim_result == SimResult.PASS and
+                      rec.formal_result in (FormalResult.PROVED, FormalResult.SKIPPED))
+        if both:
+            cc["disagreements"] = [k for k, v in cc.items() if isinstance(v, dict) and v.get("agree") is False]
+        rec.cross_check = cc or None
+        self._log(rec)
+        return rec
+
     def _log(self, rec: FeedbackRecord) -> None:
         with open(self.log_dir / f"{rec.patch_id}.json", "w") as f:
             json.dump(asdict(rec), f, indent=2, default=str)
@@ -220,8 +296,12 @@ class VerifierGate:
 # ---------------- Demo ----------------
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--engine", choices=ENGINES, default=None, help="預設 HELIOS_ENGINE 或 oss")
+    args = ap.parse_args()
     workdir = Path(__file__).parent
-    gate = VerifierGate(RuleRouter(workdir / "tau_config.json"))
+    gate = VerifierGate(RuleRouter(workdir / "tau_config.json"), engine=args.engine)
 
     cases = [
         Patch(task_type="rtl_fix", diff="+1 line", agent_conf=0.9),   # -> fast_path
@@ -232,6 +312,7 @@ if __name__ == "__main__":
         rec = gate.verify(p, workdir, top="tb_alu", dut_top="alu")
         print(f"[{rec.route:>11}] conf={rec.helios_conf:.3f} "
               f"sim={rec.sim_result.value} formal={rec.formal_result.value} "
-              f"merged={rec.merged}")
+              f"merged={rec.merged}"
+              + (f" disagree={rec.cross_check.get('disagreements')}" if rec.cross_check and "disagreements" in rec.cross_check else ""))
     print(f"\nFeedbackRecord -> {gate.log_dir}/")
     print("Next: run `python tau_calibrate.py` after >=100 records accumulate.")
